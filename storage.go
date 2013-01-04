@@ -12,9 +12,11 @@ import "strconv"
 import "io"
 import "syscall"
 import "time"
+import "log"
 //godoc -http=:8080
 //group1/M00/00/00/wKgBClCyDeKAHnIjAAAABncc3SA6654479
-const root_path = "/home/houxh/data/fdfs/storage"
+const root_path = "/home/houxh/fastdfs/storage_data"
+const binlog_root_path = "/home/houxh/fastdfs/storage"
 type Errno int32
 func (e Errno) Error() string {
 	return "errno "
@@ -26,9 +28,20 @@ type IMessage interface {
 	Unmarshal([]byte) error	
 }
 
+
 type Message interface {
 	IMessage
 	OMessage
+}
+
+type EmptyMessage struct {
+}
+
+func (this *EmptyMessage)Marshal() ([]byte, error) {
+	return nil, nil
+}
+func (this *EmptyMessage)Unmarshal(data []byte) error{
+	return nil
 }
 
 type Header struct{
@@ -143,12 +156,33 @@ func (this *UploadFileResponse)Marshal() ([]byte, error){
 	var buff bytes.Buffer
 	buff.WriteString(this.group_name)
 	pad_len := FDFS_GROUP_NAME_MAX_LEN - len(this.group_name)
-	fmt.Println(pad_len)
 	buff.Write(make([]byte, pad_len))
 	buff.WriteString(this.file_id)
 	return buff.Bytes(), nil
 }
 
+type DeleteFileRequest struct {
+	group_name string
+	file_id string
+}
+func (this *DeleteFileRequest)Unmarshal(data []byte) error{
+	buff := bytes.NewBuffer(data)
+	var err error
+	this.group_name, err = read_cstr(buff, FDFS_GROUP_NAME_MAX_LEN)
+	if err != nil {
+		return err
+	}
+	this.file_id = string(data[len(data)-buff.Len():])
+	return nil
+}
+
+
+type DeleteFileResponse struct{
+}
+
+func (this *DeleteFileResponse)Marshal() ([]byte, error) {
+	return nil, nil
+}
 
 
 type SyncCopyRequest struct {
@@ -370,7 +404,7 @@ func storage_format_ext_name(ext string) string{
 }
 
 func storage_binlog_write(timestamp int, op int8, filename string){
-	binlog_path := fmt.Sprintf("%s/data/sync/binlog.000", root_path)
+	binlog_path := fmt.Sprintf("%s/data/sync/binlog.000", binlog_root_path)
 	file, err := os.OpenFile(binlog_path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
 	if err != nil {
 		panic("error")
@@ -382,6 +416,7 @@ func storage_binlog_write(timestamp int, op int8, filename string){
 		panic("error")
 	}
 	file.Close()
+	log.Printf(rec)
 }
 
 const STORAGE_OP_TYPE_SOURCE_CREATE_FILE  =	'C'
@@ -404,11 +439,11 @@ func storage_upload_file(header *Header, conn net.Conn) int8{
 	file_ext := storage_format_ext_name(req.file_ext)
 	crc32 := crc32.ChecksumIEEE(req.file_data)
 	now := time.Now()
-	fmt.Println(req.store_path_index, req.file_length,  len(req.file_data), file_ext, crc32)
+//	log.Println(req.store_path_index, req.file_length,  len(req.file_data), file_ext, crc32)
 	file_name, full_name := storage_get_filename(int(req.store_path_index), int(now.Unix()), req.file_length, int(crc32), file_ext)
 	file, err  := os.OpenFile(full_name, os.O_WRONLY|os.O_EXCL|os.O_CREATE, 0644)
 	if err != nil {
-		fmt.Println(err)
+		log.Print(err)
 		return errno(err)
 	}
 	n, err = file.Write(req.file_data)
@@ -419,6 +454,34 @@ func storage_upload_file(header *Header, conn net.Conn) int8{
 	file_name = fmt.Sprintf("M00/%s", file_name)
 	storage_binlog_write(int(now.Unix()), STORAGE_OP_TYPE_SOURCE_CREATE_FILE, file_name)
 	resp := &UploadFileResponse{"group1", file_name}
+	if !send_response(0, resp, conn) {
+		return -1
+	}
+	return 0
+}
+
+//	STORAGE_OP_TYPE_SOURCE_DELETE_FILE
+func storage_server_delete_file(header *Header, conn net.Conn) int8{
+	buff := make([]byte, header.pkg_len)
+	n, err := io.ReadFull(conn, buff)
+	if err != nil || n != int(header.pkg_len) {
+		return -1
+	}
+	req := &DeleteFileRequest{}
+	err = req.Unmarshal(buff)
+	if err != nil {
+		return -1
+	}
+	filename, _ := storage_split_filename(req.file_id)
+	filename = fmt.Sprintf("%s/data/%s", root_path, filename)
+	err = os.Remove(filename)
+	if err != nil {
+		log.Println("remove file fail")
+		return -1
+	}
+	now := time.Now()
+	storage_binlog_write(int(now.Unix()), STORAGE_OP_TYPE_SOURCE_DELETE_FILE, req.file_id)
+	resp := &DeleteFileResponse{}
 	if !send_response(0, resp, conn) {
 		return -1
 	}
@@ -465,17 +528,23 @@ func storage_sync_delete_file(header *Header, conn net.Conn) int8{
 	buff := make([]byte, header.pkg_len)
 	n, err := io.ReadFull(conn, buff)
 	if err != nil || n != int(header.pkg_len) {
+		log.Println("1111111")
 		return -1
 	}
 	req := &SyncDeleteRequest{}
 	err = req.Unmarshal(buff)
 	if err != nil {
+		log.Println("222222222")
 		return -1
 	}
 	filename, _ := storage_split_filename(req.file_id)
 	filename = fmt.Sprintf("%s/data/%s", root_path, filename)
 	err = os.Remove(filename)
 	if err != nil {
+		log.Println("333333333333")
+		if !send_response(int8(syscall.ENOENT), &SyncDeleteResponse{}, conn) {
+			return -1
+		}
 		return -1
 	}
 
@@ -483,6 +552,14 @@ func storage_sync_delete_file(header *Header, conn net.Conn) int8{
 	resp := &SyncDeleteResponse{}
 
 	if !send_response(0, resp, conn) {
+		return -1
+	}
+	return 0
+}
+
+func storage_deal_active_test(header *Header, conn net.Conn) int8{
+	resp := &EmptyMessage{}
+	if !send_response(0, resp,  conn) {
 		return -1
 	}
 	return 0
@@ -535,6 +612,8 @@ const STORAGE_PROTO_CMD_APPEND_FILE	=	24
 const STORAGE_PROTO_CMD_SYNC_APPEND_FILE	=25
 const STORAGE_PROTO_CMD_FETCH_ONE_PATH_BINLOG=	26   
 
+
+const FDFS_PROTO_CMD_ACTIVE_TEST	=			111 
 func handle_client(conn net.Conn) {
 	buff := make([]byte, 10)
 	_, err := io.ReadFull(conn, buff)
@@ -551,12 +630,23 @@ func handle_client(conn net.Conn) {
 		storage_server_download_file(header, conn)
 	case STORAGE_PROTO_CMD_UPLOAD_FILE:
 		storage_upload_file(header, conn)
+	case STORAGE_PROTO_CMD_DELETE_FILE:
+		storage_server_delete_file(header, conn)
+	case STORAGE_PROTO_CMD_SYNC_CREATE_FILE:
+		storage_sync_copy_file(header, conn)
+	case STORAGE_PROTO_CMD_SYNC_DELETE_FILE:
+		storage_sync_delete_file(header, conn)
+	case FDFS_PROTO_CMD_ACTIVE_TEST:
+		storage_deal_active_test(header, conn)
 	default:
-		fmt.Println("error")
+		log.Println("error", header.cmd)
+		return
 	}
+	log.Println("cmd:", header.cmd)
 }
 
 func main() {
+	log.SetFlags(log.Lshortfile|log.LstdFlags)
 	rand.Seed(time.Now().UnixNano())
 	ip := net.ParseIP("0.0.0.0")
 	addr := net.TCPAddr{ip, 23000}
