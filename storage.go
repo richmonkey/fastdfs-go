@@ -514,6 +514,9 @@ func storage_sync_copy_file(header *Header, conn net.Conn) int8{
 			panic("write")
 		}
 		storage_binlog_write(int(req.timestamp), STORAGE_OP_TYPE_REPLICA_CREATE_FILE, req.file_id)
+		addr , _ := conn.RemoteAddr().(*net.TCPAddr)
+		log.Println("remote addr:", addr.IP.String())
+		UpdateSyncSrcTimestamp(addr.IP.String(), int(req.timestamp))
 	} else {
 		result = int8(uintptr(syscall.EEXIST))
 	}
@@ -614,7 +617,8 @@ const STORAGE_PROTO_CMD_FETCH_ONE_PATH_BINLOG=	26
 
 
 const FDFS_PROTO_CMD_ACTIVE_TEST	=			111 
-func handle_client(conn net.Conn) {
+func handle_client(conn *net.TCPConn) {
+
 	buff := make([]byte, 10)
 	_, err := io.ReadFull(conn, buff)
 	if err != nil {
@@ -625,6 +629,7 @@ func handle_client(conn net.Conn) {
 	if err != nil {
 		return
 	}
+	log.Println("cmd:", header.cmd)
 	switch header.cmd {
 	case STORAGE_PROTO_CMD_DOWNLOAD_FILE:
 		storage_server_download_file(header, conn)
@@ -642,10 +647,13 @@ func handle_client(conn net.Conn) {
 		log.Println("error", header.cmd)
 		return
 	}
-	log.Println("cmd:", header.cmd)
 }
 
 func main() {
+	if InitShm() == -1 {
+		panic("init shm")
+	}
+
 	log.SetFlags(log.Lshortfile|log.LstdFlags)
 	rand.Seed(time.Now().UnixNano())
 	ip := net.ParseIP("0.0.0.0")
@@ -657,7 +665,7 @@ func main() {
 		return
 	}
 	for {
-		client, err := listen.Accept();
+		client, err := listen.AcceptTCP();
 		if err != nil {
 			return
 		}
