@@ -1,0 +1,317 @@
+diff --git a/make.sh b/make.sh
+index eefac9d..5642ebb 100755
+--- a/make.sh
++++ b/make.sh
+@@ -58,8 +58,8 @@ EOF
+ 
+ ENABLE_STATIC_LIB=0
+ ENABLE_SHARED_LIB=1
+-TARGET_PREFIX=/usr/local
+-TARGET_CONF_PATH=/etc/fdfs
++TARGET_PREFIX=/home/houxh/fdfs_bin
++TARGET_CONF_PATH=/home/houxh/fdfs_bin
+ 
+ #WITH_HTTPD=1
+ #WITH_LINUX_SERVICE=1
+diff --git a/storage/Makefile.in b/storage/Makefile.in
+index fb63f95..bbdec0f 100644
+--- a/storage/Makefile.in
++++ b/storage/Makefile.in
+@@ -25,6 +25,7 @@ SHARED_OBJS = ../common/hash.o ../common/chain.o \
+ ALL_OBJS = $(SHARED_OBJS)
+ 
+ ALL_PRGS = fdfs_storaged 
++fdfs_storaged:$(ALL_OBJS)
+ 
+ all: $(ALL_OBJS) $(ALL_PRGS)
+ .o:
+@@ -40,3 +41,12 @@ install:
+ 	if [ ! -f $(CONFIG_PATH)/storage.conf ]; then cp -f ../conf/storage.conf ../conf/mime.types ../conf/http.conf $(CONFIG_PATH); fi
+ clean:
+ 	rm -f $(ALL_OBJS) $(ALL_PRGS)
++
++
++include $(SHARED_OBJS:.o=.d)
++
++%.d: %.c
++	set -e; rm -f $@; \
++	$(CC) -MM $(INC_PATH) $(CFLAGS) $< > $@.$$$$; \
++	sed 's,\($*\)\.o[ :]*,\1.o $@ : ,g' < $@.$$$$ > $@; \
++	rm -f $@.$$$$
+\ No newline at end of file
+diff --git a/storage/fdfs_storaged.c b/storage/fdfs_storaged.c
+index f54cfcd..a0af2d2 100644
+--- a/storage/fdfs_storaged.c
++++ b/storage/fdfs_storaged.c
+@@ -80,7 +80,7 @@ int main(int argc, char *argv[])
+ 	char *conf_filename;
+ 	
+ 	int result;
+-	int sock;
++	/*	int sock;*/
+ 	pthread_t schedule_tid;
+ 	struct sigaction act;
+ 	ScheduleEntry scheduleEntries[SCHEDULE_ENTRIES_COUNT];
+@@ -91,6 +91,10 @@ int main(int argc, char *argv[])
+ 		printf("Usage: %s <config_file>\n", argv[0]);
+ 		return 1;
+ 	}
++	if (init_global() != 0) {
++		return 1;
++	}
++
+ 
+ 	g_up_time = time(NULL);
+ 	log_init();
+@@ -113,7 +117,7 @@ int main(int argc, char *argv[])
+ 		return result;
+ 	}
+ 
+-	sock = socketServer(g_bind_addr, g_server_port, &result);
++	/*	sock = socketServer(g_bind_addr, g_server_port, &result);
+ 	if (sock < 0)
+ 	{
+ 		log_destroy();
+@@ -124,21 +128,22 @@ int main(int argc, char *argv[])
+ 	{
+ 		log_destroy();
+ 		return result;
++		}*/
++
++	if (0) {
++		daemon_init(true);
++		umask(0);
++
++		if (dup2(g_log_context.log_fd, STDOUT_FILENO) < 0 ||	\
++				dup2(g_log_context.log_fd, STDERR_FILENO) < 0)
++			{
++				logCrit("file: "__FILE__", line: %d, "			\
++								"call dup2 fail, errno: %d, error info: %s, " \
++								"program exit!", __LINE__, errno, STRERROR(errno));
++				g_continue_flag = false;
++				return errno;
++			}
+ 	}
+-
+-	daemon_init(true);
+-	umask(0);
+-
+-	if (dup2(g_log_context.log_fd, STDOUT_FILENO) < 0 || \
+-		dup2(g_log_context.log_fd, STDERR_FILENO) < 0)
+-	{
+-		logCrit("file: "__FILE__", line: %d, " \
+-			"call dup2 fail, errno: %d, error info: %s, " \
+-			"program exit!", __LINE__, errno, STRERROR(errno));
+-		g_continue_flag = false;
+-		return errno;
+-	}
+-
+ 	if ((result=storage_sync_init()) != 0)
+ 	{
+ 		logCrit("file: "__FILE__", line: %d, " \
+@@ -316,7 +321,11 @@ int main(int argc, char *argv[])
+ 	bTerminateFlag = false;
+ 	bAcceptEndFlag = false;
+ 	
+-	storage_accept_loop(sock);
++	//	storage_accept_loop(sock);
++	while (g_continue_flag) {
++			usleep(50000);
++	}
++
+ 	bAcceptEndFlag = true;
+ 
+ 	fdfs_binlog_sync_func(NULL);  //binlog fsync
+@@ -356,8 +365,9 @@ int main(int argc, char *argv[])
+ 	storage_service_destroy();
+ 	storage_sync_destroy();
+ 	storage_func_destroy();
+-
++	
+ 	logInfo("exit nomally.\n");
++	destroy_global();
+ 	log_destroy();
+ 	
+ 	return 0;
+diff --git a/storage/storage_global.c b/storage/storage_global.c
+index d3bac86..6f32194 100644
+--- a/storage/storage_global.c
++++ b/storage/storage_global.c
+@@ -9,6 +9,8 @@
+ #include <netdb.h>
+ #include <unistd.h>
+ #include <errno.h>
++#include <sys/ipc.h>
++#include <sys/shm.h>
+ #include "logger.h"
+ #include "sockopt.h"
+ #include "shared_func.h"
+@@ -43,8 +45,9 @@ int g_dist_path_index_high = 0; //current write to high path
+ int g_dist_path_index_low = 0;  //current write to low path
+ int g_dist_write_file_count = 0;  //current write file count
+ 
++ShareMemory *g_shm;
+ int g_storage_count = 0;
+-FDFSStorageServer g_storage_servers[FDFS_MAX_SERVERS_EACH_GROUP];
++//FDFSStorageServer g_storage_servers[FDFS_MAX_SERVERS_EACH_GROUP];
+ FDFSStorageServer *g_sorted_storages[FDFS_MAX_SERVERS_EACH_GROUP];
+ 
+ char g_group_name[FDFS_GROUP_NAME_MAX_LEN + 1] = {0};
+@@ -62,9 +65,9 @@ int g_sync_binlog_buff_interval = SYNC_BINLOG_BUFF_DEF_INTERVAL;
+ int g_write_mark_file_freq = FDFS_DEFAULT_SYNC_MARK_FILE_FREQ;
+ int g_sync_stat_file_interval = DEFAULT_SYNC_STAT_FILE_INTERVAL;
+ 
+-FDFSStorageStat g_storage_stat;
+-int g_stat_change_count = 1;
+-int g_sync_change_count = 0;
++//FDFSStorageStat g_storage_stat;
++//int g_stat_change_count = 1;
++//int g_sync_change_count = 0;
+ 
+ int g_storage_join_time = 0;
+ bool g_sync_old_done = false;
+@@ -115,3 +118,61 @@ int storage_cmp_by_ip_addr(const void *p1, const void *p2)
+ 		(*((FDFSStorageServer **)p2))->server.ip_addr);
+ }
+ 
++
++static key_t shmkey() {
++	key_t key;
++	/*	int n;
++	char buf[1024];
++	n = readlink("/proc/self/exe", buf, sizeof(buf));
++	if (n < 0) {
++		return -1;
++	}
++	buf[n] = 0;
++	*/
++
++	key = ftok("/tmp", 0x03);
++	return key;
++}
++
++static int shm_id;
++static int init_shm() {
++	key_t key;
++	void *map;
++	key = shmkey();
++	if (-1 == key) {
++		return -1;
++	}
++#define SHMSIZE 	sizeof(ShareMemory)
++	shm_id=shmget(key, SHMSIZE, IPC_CREAT|0600); 
++	if (-1 == shm_id) {
++		return -1;
++	}
++	map=shmat(shm_id,NULL,0);
++	if ((void*)-1 == map) {
++		return -1;
++	}
++	memset(map, 0, SHMSIZE);
++	g_shm = map;
++	return 0;
++}
++
++static int destroy_shm() {
++	struct shmid_ds buf;
++	int result;
++	result = shmdt(g_shm);
++	if (result != 0) {
++		return result;
++	}
++	result = shmctl(shm_id, IPC_RMID, &buf);
++	if (result != 0) {
++		return result;
++	}
++	return 0;
++}
++int  init_global() {
++	if (init_shm() != 0) return -1;
++	g_stat_change_count = 1;
++}
++void destroy_global() {
++	destroy_shm();
++}
+diff --git a/storage/storage_global.h b/storage/storage_global.h
+index 399826c..0f2a187 100644
+--- a/storage/storage_global.h
++++ b/storage/storage_global.h
+@@ -79,8 +79,19 @@ extern int g_dist_path_index_high; //current write to high path
+ extern int g_dist_path_index_low;  //current write to low path
+ extern int g_dist_write_file_count; //current write file count
+ 
++
++
++typedef struct  {
++	FDFSStorageServer g_storage_servers[FDFS_MAX_SERVERS_EACH_GROUP];
++	int g_sync_change_count;
++	FDFSStorageStat g_storage_stat;
++	int g_stat_change_count;
++}ShareMemory;
++extern ShareMemory *g_shm;
++
+ extern int g_storage_count;  //stoage server count in my group
+-extern FDFSStorageServer g_storage_servers[FDFS_MAX_SERVERS_EACH_GROUP];
++//extern FDFSStorageServer g_storage_servers[FDFS_MAX_SERVERS_EACH_GROUP];
++#define g_storage_servers (g_shm->g_storage_servers)
+ extern FDFSStorageServer *g_sorted_storages[FDFS_MAX_SERVERS_EACH_GROUP];
+ 
+ extern char g_group_name[FDFS_GROUP_NAME_MAX_LEN + 1];
+@@ -97,9 +108,13 @@ extern int g_sync_binlog_buff_interval; //sync binlog buff to disk every interva
+ extern int g_write_mark_file_freq;      //write to mark file after sync N files
+ extern int g_sync_stat_file_interval;   //sync storage stat info to disk interval
+ 
+-extern FDFSStorageStat g_storage_stat;
+-extern int g_stat_change_count;
+-extern int g_sync_change_count; //sync src timestamp change counter
++	//extern FDFSStorageStat g_storage_stat;
++	//extern int g_stat_change_count;
++#define g_storage_stat (g_shm->g_storage_stat)
++#define g_stat_change_count (g_shm->g_stat_change_count)
++
++//extern int g_sync_change_count; //sync src timestamp change counter
++#define g_sync_change_count (g_shm->g_sync_change_count)
+ 
+ extern int g_storage_join_time;  //my join timestamp
+ extern bool g_sync_old_done;     //if old files synced to me done
+@@ -146,6 +161,9 @@ extern struct storage_dio_thread_data *g_dio_thread_data;  //disk io thread data
+ 
+ int storage_cmp_by_ip_addr(const void *p1, const void *p2);
+ 
++int  init_global();
++void destroy_global();
++
+ #ifdef __cplusplus
+ }
+ #endif
+diff --git a/storage/storage_sync.c b/storage/storage_sync.c
+index ad3b77e..92036bf 100644
+--- a/storage/storage_sync.c
++++ b/storage/storage_sync.c
+@@ -1898,7 +1898,7 @@ static int storage_binlog_preread(StorageBinLogReader *pReader)
+ 	}
+ 	else if (bytes_read == 0) //end of binlog file
+ 	{
+-		pReader->binlog_buff.version = saved_binlog_write_version;
++		//	pReader->binlog_buff.version = saved_binlog_write_version;
+ 		return ENOENT;
+ 	}
+ 
+diff --git a/storage/tracker_client_thread.c b/storage/tracker_client_thread.c
+index 3b7009c..b009468 100644
+--- a/storage/tracker_client_thread.c
++++ b/storage/tracker_client_thread.c
+@@ -53,11 +53,12 @@ static int tracker_storage_changelog_req(TrackerServerInfo *pTrackerServer);
+ static bool tracker_insert_into_sorted_servers( \
+ 		FDFSStorageServer *pInsertedServer);
+ 
++
+ int tracker_report_init()
+ {
+ 	int result;
+ 
+-	memset(g_storage_servers, 0, sizeof(g_storage_servers));
++	memset(g_storage_servers, 0, FDFS_MAX_SERVERS_EACH_GROUP*sizeof(FDFSStorageServer));
+ 	memset(g_sorted_storages, 0, sizeof(g_sorted_storages));
+ 
+ 	if ((result=init_pthread_lock(&reporter_thread_lock)) != 0)

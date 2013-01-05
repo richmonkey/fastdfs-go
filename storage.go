@@ -13,10 +13,12 @@ import "io"
 import "syscall"
 import "time"
 import "log"
+import "github.com/kless/goconfig/config"
 //godoc -http=:8080
 //group1/M00/00/00/wKgBClCyDeKAHnIjAAAABncc3SA6654479
-const root_path = "/home/houxh/fastdfs/storage_data"
-const binlog_root_path = "/home/houxh/fastdfs/storage"
+var root_path = ""
+var binlog_root_path = ""
+
 type Errno int32
 func (e Errno) Error() string {
 	return "errno "
@@ -28,20 +30,9 @@ type IMessage interface {
 	Unmarshal([]byte) error	
 }
 
-
 type Message interface {
 	IMessage
 	OMessage
-}
-
-type EmptyMessage struct {
-}
-
-func (this *EmptyMessage)Marshal() ([]byte, error) {
-	return nil, nil
-}
-func (this *EmptyMessage)Unmarshal(data []byte) error{
-	return nil
 }
 
 type Header struct{
@@ -75,9 +66,6 @@ type DownloadFileRequest struct {
 	download_bytes int64
 	group_name string
 	file_id string
-}
-func (this *DownloadFileRequest)Marshal() ([]byte, error){
-	return nil, Errno(0xFF)
 }
 
 func read_cstr(buff io.Reader, length int) (string, error) {
@@ -117,7 +105,6 @@ type DownloadFileResponse struct{
 func (this *DownloadFileResponse)Marshal() ([]byte, error){
 	return this.file_data, nil
 }
-
 
 const FDFS_FILE_EXT_NAME_MAX_LEN = 6
 type UploadFileRequest struct{
@@ -177,14 +164,6 @@ func (this *DeleteFileRequest)Unmarshal(data []byte) error{
 }
 
 
-type DeleteFileResponse struct{
-}
-
-func (this *DeleteFileResponse)Marshal() ([]byte, error) {
-	return nil, nil
-}
-
-
 type SyncCopyRequest struct {
 	file_length int64
 	group_name string
@@ -225,15 +204,6 @@ func (this *SyncCopyRequest)Unmarshal(data []byte) error{
 	return nil
 }
 
-//empty
-type SyncCopyResponse struct {
-	
-}
-
-func (this *SyncCopyResponse)Marshal() ([]byte, error){
-	return nil, nil
-}
-
 type SyncDeleteRequest struct {
 	timestamp int32
 	group_name string
@@ -255,20 +225,13 @@ func (this *SyncDeleteRequest)Unmarshal(data []byte) error{
 	return nil
 }
 
-type SyncDeleteResponse struct {
-}
-
-func (this *SyncDeleteResponse)Marshal() ([]byte, error){
-	return nil, nil
-}
-
 func COMBINE_RAND_FILE_SIZE(file_size int64) int64{
 	var r int64 = int64(rand.Int31() & 0x007FFFFF) | int64(0x80000000)
 	return r << 32 | int64(file_size)
 }
 
-func storage_gen_filename(file_size int64, crc32 int, fext string, timestamp int) string {
-	server_id := []byte(net.ParseIP("192.168.1.10").To4())
+func storage_gen_filename(ip string, file_size int64, crc32 int, fext string, timestamp int) string {
+	server_id := []byte(net.ParseIP(ip).To4())
 	buffer := new(bytes.Buffer)
 	_, err := buffer.Write(server_id)
 	if err != nil {
@@ -306,10 +269,10 @@ func file_exist(filename string) bool {
 	return false
 }
 
-func storage_get_filename(store_path_index int, start_time int, 
+func storage_get_filename(ip string, store_path_index int, start_time int, 
 	file_size int64, crc32 int, fext string) (string, string) {
 	for i := 0; i < 10; i++ {
-		filename := storage_gen_filename(file_size, crc32, fext, start_time)
+		filename := storage_gen_filename(ip, file_size, crc32, fext, start_time)
 		fullname := fmt.Sprintf("%s/data/%s", root_path, filename)
 		if !file_exist(filename) {
 			return filename, fullname
@@ -327,7 +290,7 @@ func storage_split_filename(logic_filename string)(filename string, store_path_i
 	return
 }
 
-func errno(err error) int8{
+func errno(err error) int{
 	fmt.Println("error:", err)
 	panic("error")
 	e, ok := err.(*os.PathError)
@@ -336,52 +299,58 @@ func errno(err error) int8{
 	}
 	ee, _ := e.Err.(syscall.Errno)
 	dd := uintptr(ee)
-	return int8(dd)
+	return int(dd)
 }
 
-func storage_server_download_file(header *Header, conn net.Conn) int8{
+func storage_server_download_file(header *Header, conn net.Conn) bool{
+	var data []byte
+	result := 0
 	buff := make([]byte, header.pkg_len)
 	n, err := io.ReadFull(conn, buff)
 	if err != nil || n != int(header.pkg_len) {
-		return -1
+		return false
 	}
 
 	req := &DownloadFileRequest{}
 	err = req.Unmarshal(buff)
 	if err != nil {
-		return -1
+		return false
 	}
 
 	//store_path_index
-	
 	filename, _ := storage_split_filename(req.file_id)
 	filename = fmt.Sprintf("%s/data/%s", root_path, filename)
 	fmt.Println(req.file_id, filename)
 	file, err := os.Open(filename)
 	if err != nil {
-		return errno(err)
+		result = errno(err)
+		goto Error
 	}
 
 	if req.download_bytes == 0 {
 		finfo, err := file.Stat()
 		if err != nil {
-			return errno(err)
+			result = errno(err)
+			goto Error
 		}
 		req.download_bytes = finfo.Size()
 	}
+
 	fmt.Println(len(req.group_name), req.group_name, req.file_id, req.download_bytes, req.file_offset)
-	data := make([]byte, req.download_bytes)
+
+	data = make([]byte, req.download_bytes)
 	n, err = file.ReadAt(data, req.file_offset)
 	if err != nil {
-		return errno(err)
+		result = errno(err)
+		goto Error
 	}
 	if n != int(req.download_bytes) {
-		return -1
+		result = 127
+		goto Error
 	}
-	if !send_response(0, &DownloadFileResponse{data}, conn) {
-		return -1
-	}
-	return 0
+	return send_response(&DownloadFileResponse{data}, conn)
+Error:
+	return send_result(result, conn)
 }
 
 func storage_format_ext_name(ext string) string{
@@ -424,27 +393,29 @@ const STORAGE_OP_TYPE_SOURCE_DELETE_FILE  =	'D'
 const STORAGE_OP_TYPE_REPLICA_CREATE_FILE =	'c'
 const STORAGE_OP_TYPE_REPLICA_DELETE_FILE =	'd'
 
-func storage_upload_file(header *Header, conn net.Conn) int8{
+func storage_upload_file(header *Header, conn net.Conn) bool{
 	buff := make([]byte, header.pkg_len)
 	n, err := io.ReadFull(conn, buff)
 	if err != nil || n != int(header.pkg_len) {
-		return -1
+		return false
 	}
 	req := &UploadFileRequest{}
 	err = req.Unmarshal(buff)
 	if err != nil {
-		return -1
+		return false
 	}
 
 	file_ext := storage_format_ext_name(req.file_ext)
 	crc32 := crc32.ChecksumIEEE(req.file_data)
 	now := time.Now()
 //	log.Println(req.store_path_index, req.file_length,  len(req.file_data), file_ext, crc32)
-	file_name, full_name := storage_get_filename(int(req.store_path_index), int(now.Unix()), req.file_length, int(crc32), file_ext)
+
+	addr , _ := conn.RemoteAddr().(*net.TCPAddr)
+	file_name, full_name := storage_get_filename(addr.IP.String(), int(req.store_path_index), int(now.Unix()), req.file_length, int(crc32), file_ext)
 	file, err  := os.OpenFile(full_name, os.O_WRONLY|os.O_EXCL|os.O_CREATE, 0644)
 	if err != nil {
 		log.Print(err)
-		return errno(err)
+		return send_result(errno(err), conn)
 	}
 	n, err = file.Write(req.file_data)
 	if err != nil || n != len(req.file_data) {
@@ -453,52 +424,48 @@ func storage_upload_file(header *Header, conn net.Conn) int8{
 
 	file_name = fmt.Sprintf("M00/%s", file_name)
 	storage_binlog_write(int(now.Unix()), STORAGE_OP_TYPE_SOURCE_CREATE_FILE, file_name)
+
 	resp := &UploadFileResponse{"group1", file_name}
-	if !send_response(0, resp, conn) {
-		return -1
-	}
-	return 0
+	return send_response(resp, conn)
 }
 
 //	STORAGE_OP_TYPE_SOURCE_DELETE_FILE
-func storage_server_delete_file(header *Header, conn net.Conn) int8{
+func storage_server_delete_file(header *Header, conn net.Conn) bool{
+	result := 0
 	buff := make([]byte, header.pkg_len)
 	n, err := io.ReadFull(conn, buff)
 	if err != nil || n != int(header.pkg_len) {
-		return -1
+		return false
 	}
 	req := &DeleteFileRequest{}
 	err = req.Unmarshal(buff)
 	if err != nil {
-		return -1
+		return false
 	}
 	filename, _ := storage_split_filename(req.file_id)
 	filename = fmt.Sprintf("%s/data/%s", root_path, filename)
 	err = os.Remove(filename)
 	if err != nil {
 		log.Println("remove file fail")
-		return -1
+		result = errno(err)
+		goto Exit
 	}
-	now := time.Now()
-	storage_binlog_write(int(now.Unix()), STORAGE_OP_TYPE_SOURCE_DELETE_FILE, req.file_id)
-	resp := &DeleteFileResponse{}
-	if !send_response(0, resp, conn) {
-		return -1
-	}
-	return 0
+	storage_binlog_write(int(time.Now().Unix()), STORAGE_OP_TYPE_SOURCE_DELETE_FILE, req.file_id)
+Exit:
+	return send_result(result, conn)
 }
 
-func storage_sync_copy_file(header *Header, conn net.Conn) int8{
-	var result int8
+func storage_sync_copy_file(header *Header, conn net.Conn) bool{
+	result := 0
 	buff := make([]byte, header.pkg_len)
 	n, err := io.ReadFull(conn, buff)
 	if err != nil || n != int(header.pkg_len) {
-		return -1
+		return false
 	}
 	req := &SyncCopyRequest{}
 	err = req.Unmarshal(buff)
 	if err != nil {
-		return -1
+		return false
 	}
 	have_file_content := header.status == 0
 	filename, _ := storage_split_filename(req.file_id)
@@ -507,7 +474,8 @@ func storage_sync_copy_file(header *Header, conn net.Conn) int8{
 		file, err  := os.OpenFile(filename, os.O_WRONLY|os.O_EXCL|os.O_CREATE, 0644)
 		if err != nil {
 			fmt.Println(err)
-			return errno(err)
+			result = errno(err)
+			goto Exit
 		}
 		n, err = file.Write(req.file_data)
 		if err != nil || n != len(req.file_data) {
@@ -518,61 +486,55 @@ func storage_sync_copy_file(header *Header, conn net.Conn) int8{
 		log.Println("remote addr:", addr.IP.String())
 		UpdateSyncSrcTimestamp(addr.IP.String(), int(req.timestamp))
 	} else {
-		result = int8(uintptr(syscall.EEXIST))
+		result = int(syscall.EEXIST)
 	}
-	resp := &SyncCopyResponse{}
-	if !send_response(result, resp, conn) {
-		return -1
-	}
-	return 0
+
+Exit:
+	return send_result(result, conn)
 }
 
-func storage_sync_delete_file(header *Header, conn net.Conn) int8{
+func storage_sync_delete_file(header *Header, conn net.Conn) bool{
 	buff := make([]byte, header.pkg_len)
 	n, err := io.ReadFull(conn, buff)
 	if err != nil || n != int(header.pkg_len) {
-		log.Println("1111111")
-		return -1
+		return false
 	}
 	req := &SyncDeleteRequest{}
 	err = req.Unmarshal(buff)
 	if err != nil {
-		log.Println("222222222")
-		return -1
+		return false
 	}
 	filename, _ := storage_split_filename(req.file_id)
 	filename = fmt.Sprintf("%s/data/%s", root_path, filename)
 	err = os.Remove(filename)
 	if err != nil {
-		log.Println("333333333333")
-		if !send_response(int8(syscall.ENOENT), &SyncDeleteResponse{}, conn) {
-			return -1
-		}
-		return -1
+		return send_result(errno(err), conn)
 	}
 
 	storage_binlog_write(int(req.timestamp), STORAGE_OP_TYPE_REPLICA_DELETE_FILE, req.file_id)
-	resp := &SyncDeleteResponse{}
 
-	if !send_response(0, resp, conn) {
-		return -1
-	}
-	return 0
+	return send_result(0, conn)
 }
 
-func storage_deal_active_test(header *Header, conn net.Conn) int8{
-	resp := &EmptyMessage{}
-	if !send_response(0, resp,  conn) {
-		return -1
-	}
-	return 0
+func storage_deal_active_test(header *Header, conn net.Conn) bool{
+	return send_result(0, conn) 
 }
 
 const STORAGE_PROTO_CMD_RESP = 100
-func send_response(status int8, resp OMessage, conn net.Conn) bool{
-	data, err := resp.Marshal()
-	if err != nil {
-		panic("marshal")
+func send_result(status int, conn net.Conn) bool {
+	return send_response_p(int8(status), nil, conn)
+}
+func send_response(resp OMessage, conn net.Conn) bool{
+	return send_response_p(0, resp, conn)
+}
+func send_response_p(status int8, resp OMessage, conn net.Conn) bool{
+	var data []byte = nil
+	var err error 
+	if resp != nil {
+		data, err = resp.Marshal()
+		if err != nil {
+			panic("marshal")
+		}
 	}
 
 	header := &Header{}
@@ -615,45 +577,63 @@ const STORAGE_PROTO_CMD_APPEND_FILE	=	24
 const STORAGE_PROTO_CMD_SYNC_APPEND_FILE	=25
 const STORAGE_PROTO_CMD_FETCH_ONE_PATH_BINLOG=	26   
 
-
 const FDFS_PROTO_CMD_ACTIVE_TEST	=			111 
-func handle_client(conn *net.TCPConn) {
 
+func handle_request(conn *net.TCPConn) bool {
 	buff := make([]byte, 10)
 	_, err := io.ReadFull(conn, buff)
 	if err != nil {
-		return
+		return false
 	}
 	header := &Header{}
 	err = header.Unmarshal(buff)
 	if err != nil {
-		return
+		return false
 	}
 	log.Println("cmd:", header.cmd)
 	switch header.cmd {
 	case STORAGE_PROTO_CMD_DOWNLOAD_FILE:
-		storage_server_download_file(header, conn)
+		return storage_server_download_file(header, conn)
 	case STORAGE_PROTO_CMD_UPLOAD_FILE:
-		storage_upload_file(header, conn)
+		return storage_upload_file(header, conn)
 	case STORAGE_PROTO_CMD_DELETE_FILE:
-		storage_server_delete_file(header, conn)
+		return storage_server_delete_file(header, conn)
 	case STORAGE_PROTO_CMD_SYNC_CREATE_FILE:
-		storage_sync_copy_file(header, conn)
+		return storage_sync_copy_file(header, conn)
 	case STORAGE_PROTO_CMD_SYNC_DELETE_FILE:
-		storage_sync_delete_file(header, conn)
+		return storage_sync_delete_file(header, conn)
 	case FDFS_PROTO_CMD_ACTIVE_TEST:
-		storage_deal_active_test(header, conn)
+		return storage_deal_active_test(header, conn)
 	default:
 		log.Println("error", header.cmd)
-		return
+		return false
+	}
+	return false
+}
+
+func handle_client(conn *net.TCPConn) {
+	for {
+		if !handle_request(conn) {
+			break
+		}
 	}
 }
 
+func read_config() {
+	if len(os.Args) == 1 { panic("config") }
+	cf := os.Args[1]
+	conf, err := config.ReadDefault(cf)
+	if err != nil { panic("config") }
+	binlog_root_path, err = conf.String("DEFAULT", "base_path")
+	if err != nil { panic("config") }
+	root_path, err = conf.String("DEFAULT", "store_path0")
+	if err != nil { panic("config") }
+}
 func main() {
 	if InitShm() == -1 {
 		panic("init shm")
 	}
-
+	read_config()
 	log.SetFlags(log.Lshortfile|log.LstdFlags)
 	rand.Seed(time.Now().UnixNano())
 	ip := net.ParseIP("0.0.0.0")
